@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from enum import Enum
 from typing import Literal, Optional
@@ -49,7 +50,7 @@ async def lifespan(server: FastMCP):
         for port, shell_drv in connections.items():
             try:
                 shell_drv.target.deactivate(shell_drv)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
         connections.clear()
 
@@ -69,6 +70,9 @@ class SerialSkill(MCPMixin):
         port: str,
         baudrate: int = 115200,
         shell_type: PromptType = PromptType.busybox,
+        login_prompt: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
         ctx: Context = None,
     ) -> SerialConnectResponse:
         """
@@ -78,10 +82,13 @@ class SerialSkill(MCPMixin):
             port (str): need to connect serial port
             baudrate (int, optional): baudrate. Defaults to 115200.
             shell_type (PromptType, optional): shell type. Defaults to PromptType.busybox.
+            login_prompt (str, optional): login prompt regex. If not provided, login is skipped.
+            username (str, optional): login username. If not provided, login is skipped.
+            password (str, optional): login password.
 
         Returns:
-            str: serial port connection information
-        """ 
+            SerialConnectResponse: serial port connection information
+        """
         await ctx.info(f"正在连接串口 {port}，波特率 {baudrate}，类型 {shell_type.name}")
 
         connections: dict = ctx.lifespan_context["connections"]
@@ -96,12 +103,18 @@ class SerialSkill(MCPMixin):
 
         # 创建 labgrid Target 和 Driver
         target = Target(f"serial_{port.replace('/', '_')}")
-        RawSerialPort(target, name=None, port=port, speed=baudrate)
-        SerialDriver(target, name=None)
-        shell_drv = ShellDriver(target, name=None, prompt=prompt)
-        shell_drv.target = target  # 方便 lifespan 清理
+        RawSerialPort(target, name="serial_port", port=port, speed=baudrate)
+        SerialDriver(target, name="serial_driver")
+        shell_drv = ShellDriver(
+            target,
+            name="shell_driver",
+            prompt=prompt,
+            login_prompt=login_prompt or r"LABGRID_NOLOGIN",
+            username=username or "nobody",
+            password=password,
+        )
 
-        target.activate(shell_drv)
+        await asyncio.to_thread(target.activate, shell_drv)
         connections[port] = shell_drv
 
         await ctx.info(f"串口 {port} 连接成功")
@@ -145,7 +158,7 @@ class SerialSkill(MCPMixin):
         await ctx.info(f"[{port}] 执行命令: {command}")
         await ctx.report_progress(0, 100, "发送命令中...")
 
-        stdout, stderr, retcode = shell_drv.run(command)
+        stdout, stderr, retcode = await asyncio.to_thread(shell_drv.run, command)
 
         await ctx.report_progress(100, 100, "命令执行完毕")
 
@@ -184,8 +197,8 @@ class SerialSkill(MCPMixin):
             )
 
         try:
-            shell_drv.target.deactivate(shell_drv)
-        except Exception as e:
+            await asyncio.to_thread(shell_drv.target.deactivate, shell_drv)
+        except Exception as e:  # noqa: BLE001
             await ctx.warning(f"断开 {port} 时出现警告: {e}")
 
         await ctx.info(f"串口 {port} 已断开")
@@ -202,7 +215,7 @@ class SerialSkill(MCPMixin):
     async def list_connections(self, ctx: Context = None) -> list[str]:
         """返回当前已激活的串口列表。"""
         connections: dict = ctx.lifespan_context["connections"]
-        return list(connections.keys()) or ["当前没有任何已连接的串口"]
+        return list(connections.keys())
 
 
 # ── 将 SerialSkill 的所有 mcp_tool 注册到 mcp server ──────────────────────
